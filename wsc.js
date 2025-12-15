@@ -293,4 +293,4 @@ ha-card{
   }
 }
 
-customElements.define("weather-station-card", WSCCard);
+customElements.define("weather-station-card2", WSCCard);
