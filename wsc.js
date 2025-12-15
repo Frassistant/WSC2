@@ -10,7 +10,7 @@
  */
 
 class WSCCard extends HTMLElement {
-  static VERSION = "1.0.2";
+  static VERSION = "1.0.3";
 
   constructor() {
     super();
@@ -715,7 +715,7 @@ class WSCCard extends HTMLElement {
   }
 }
 
-customElements.define("weather-station-card", WSCCard);
+customElements.define("weather-station-card2", WSCCard);
 
 // Optional: HA card picker description
 window.customCards = window.customCards || [];
