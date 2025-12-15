@@ -1,26 +1,16 @@
 /* ======================================================
  * WSC PRO – Weather Station Card
- * v1.8.0 FINAL
+ * v2.0.0
+ * ======================================================
+ * Dual Mode:
+ *  - SIMPLE → weather.forecast_*
+ *  - PRO → stazione meteo completa
  *
- * - Dual mode:
- *   • SIMPLE → weather.forecast_*
- *   • PRO → stazione meteo (sensori)
- *
- * - SIMPLE:
- *   ✔ meteo attuale
- *   ✔ ora + data
- *   ✔ previsioni giorni successivi
- *   ✖ no bottoni, no grafici
- *
- * - PRO:
- *   ✔ vista base pulita
- *   ✔ badge su una sola riga
- *   ✔ pioggia realtime vera
- *   ✔ 2 bottoni separati
- *     → grafici
- *     → dati & storici
- *
- * - Grafici FIXATI (no repaint loop)
+ * Designed for:
+ *  ✔ mobile
+ *  ✔ tablet
+ *  ✔ dashboard
+ *  ✔ badge-like cards
  * ====================================================== */
 
 class WSCCard extends HTMLElement {
@@ -32,14 +22,13 @@ class WSCCard extends HTMLElement {
     this._config = null;
 
     this._ui = {
-      charts: false,
-      details: false,
+      showCharts: false,
+      showDetails: false,
     };
 
     this._series = new Map();
     this._lastRainEvent = null;
     this._lastRainTs = 0;
-
     this._raf = null;
     this._pending = false;
   }
@@ -49,38 +38,29 @@ class WSCCard extends HTMLElement {
   setConfig(cfg) {
     if (!cfg.weather_entity && !cfg.temperatura) {
       throw new Error(
-        'Specifica "weather_entity" (meteo semplice) oppure "temperatura" (stazione meteo)'
+        'Devi specificare "weather_entity" oppure "temperatura"'
       );
     }
 
     this._config = {
-      nome: cfg.nome ?? cfg.name ?? "",
-      mostra_nome: cfg.mostra_nome ?? true,
-      mostra_orologio: cfg.mostra_orologio ?? true,
-      mostra_data: cfg.mostra_data ?? true,
-
+      name: cfg.name ?? cfg.nome ?? "",
       weather_entity: cfg.weather_entity ?? null,
 
+      // PRO sensors
       temperatura: cfg.temperatura ?? null,
       umidita: cfg.umidita ?? null,
       velocita_vento: cfg.velocita_vento ?? null,
       raffica_vento: cfg.raffica_vento ?? null,
       direzione_vento: cfg.direzione_vento ?? null,
-
       tasso_pioggia: cfg.tasso_pioggia ?? null,
       pioggia_evento: cfg.pioggia_evento ?? null,
-
       radiazione_solare: cfg.radiazione_solare ?? null,
       lux: cfg.lux ?? null,
       uv: cfg.uv ?? null,
-
       punto_rugiada: cfg.punto_rugiada ?? null,
       vpd: cfg.vpd ?? null,
-
       pressione_relativa: cfg.pressione_relativa ?? null,
       pressione_assoluta: cfg.pressione_assoluta ?? null,
-
-      // storici
       pioggia_giornaliera: cfg.pioggia_giornaliera ?? null,
       pioggia_mensile: cfg.pioggia_mensile ?? null,
       pioggia_annuale: cfg.pioggia_annuale ?? null,
@@ -120,11 +100,11 @@ class WSCCard extends HTMLElement {
     };
   }
 
-  _simpleMode() {
+  _isSimple() {
     return !!this._config.weather_entity && !this._config.temperatura;
   }
 
-  /* ================= RAIN REALTIME ================= */
+  /* ================= RAIN ================= */
 
   _updateRainEvent() {
     const e = this._num(this._config.pioggia_evento);
@@ -143,13 +123,10 @@ class WSCCard extends HTMLElement {
 
   /* ================= METEO ================= */
 
-  _conditionSimple() {
-    const s = this._state(this._config.weather_entity);
-    const st = s?.state ?? "cloudy";
-
+  _simpleCondition(state) {
     const map = {
       sunny: ["☀️", "Sole"],
-      clear: ["☀️", "Sole"],
+      clear: ["☀️", "Sereno"],
       partlycloudy: ["⛅", "Parz. nuvoloso"],
       cloudy: ["☁️", "Coperto"],
       rainy: ["🌧️", "Pioggia"],
@@ -158,8 +135,7 @@ class WSCCard extends HTMLElement {
       snowy: ["❄️", "Neve"],
       windy: ["🌬️", "Ventoso"],
     };
-
-    return map[st] ?? ["☁️", st];
+    return map[state] ?? ["☁️", state];
   }
 
   /* ================= SCHEDULER ================= */
@@ -179,28 +155,36 @@ class WSCCard extends HTMLElement {
   _render() {
     if (!this._hass || !this._config) return;
 
-    const simple = this._simpleMode();
     const now = this._now();
+    const simple = this._isSimple();
 
-    /* ---------- SIMPLE MODE ---------- */
+    /* =====================================================
+     * SIMPLE MODE
+     * ===================================================== */
     if (simple) {
       const w = this._state(this._config.weather_entity);
-      const [icon, label] = this._conditionSimple();
+      const [icon, label] = this._simpleCondition(w?.state);
       const temp = w?.attributes?.temperature;
-
       const forecast = (w?.attributes?.forecast ?? []).slice(0, 5);
 
       this.shadowRoot.innerHTML = `
 <style>
-ha-card{padding:24px;border-radius:28px;background:linear-gradient(135deg,#0b1220,#0f172a);color:#fff}
-.temp{font-size:72px;font-weight:900}
-.icon{font-size:72px}
-.forecast{margin-top:16px;display:flex;gap:10px;overflow-x:auto}
-.day{min-width:64px;text-align:center;opacity:.85}
+ha-card{
+  padding:22px;
+  border-radius:26px;
+  background:linear-gradient(135deg,#0b1220,#0f172a);
+  color:#fff;
+}
+.header{display:flex;justify-content:space-between}
+.temp{font-size:64px;font-weight:900}
+.icon{font-size:64px;animation:float 6s ease-in-out infinite}
+@keyframes float{50%{transform:translateY(-8px)}}
+.forecast{display:flex;gap:10px;margin-top:16px;overflow-x:auto}
+.day{text-align:center;min-width:60px;opacity:.85}
 </style>
 
 <ha-card>
-  <div style="display:flex;justify-content:space-between">
+  <div class="header">
     <div>
       <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
       <div>${label}</div>
@@ -210,45 +194,49 @@ ha-card{padding:24px;border-radius:28px;background:linear-gradient(135deg,#0b122
   </div>
 
   <div class="forecast">
-    ${forecast
-      .map(
-        (f) => `
+    ${forecast.map(f => `
       <div class="day">
         <div>${new Date(f.datetime).toLocaleDateString("it-IT",{weekday:"short"})}</div>
         <div>${f.temperature}°</div>
-      </div>`
-      )
-      .join("")}
+      </div>`).join("")}
   </div>
 </ha-card>`;
       return;
     }
 
-    /* ---------- PRO MODE ---------- */
+    /* =====================================================
+     * PRO MODE
+     * ===================================================== */
 
-    const temp = this._num(this._config.temperatura);
-    const hum = this._num(this._config.umidita);
-    const wind = this._num(this._config.velocita_vento);
-    const rain = this._num(this._config.tasso_pioggia);
+    const t = this._num(this._config.temperatura);
+    const h = this._num(this._config.umidita);
+    const w = this._num(this._config.velocita_vento);
+    const r = this._num(this._config.tasso_pioggia);
 
     this.shadowRoot.innerHTML = `
 <style>
-ha-card{padding:26px;border-radius:32px;background:linear-gradient(135deg,#0b1220,#0f172a);color:#fff}
-.temp{font-size:78px;font-weight:900}
-.badges{display:flex;gap:8px;overflow-x:auto}
+ha-card{
+  padding:26px;
+  border-radius:32px;
+  background:linear-gradient(135deg,#0b1220,#0f172a);
+  color:#fff;
+}
+.temp{font-size:72px;font-weight:900}
+.badges{display:flex;gap:8px;overflow-x:auto;margin-top:6px}
 .badge{padding:6px 12px;border-radius:999px;background:rgba(255,255,255,.14)}
-.btns{margin-top:14px;display:flex;gap:10px}
-button{border-radius:14px;padding:10px 14px;border:none;background:#ffffff1f;color:#fff}
+.btns{display:flex;gap:10px;margin-top:14px}
+button{padding:10px 14px;border-radius:14px;border:none;background:#ffffff1f;color:#fff}
+.footer{margin-top:12px;font-size:11px;opacity:.6;display:flex;justify-content:space-between}
 </style>
 
 <ha-card>
-  <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
+  <div class="temp">${t?.toFixed(1) ?? "—"}°</div>
   <div>${now.time} • ${now.date}</div>
 
   <div class="badges">
-    ${hum !== null ? `<div class="badge">💧 ${hum}%</div>` : ""}
-    ${wind !== null ? `<div class="badge">🌬️ ${wind.toFixed(1)} km/h</div>` : ""}
-    ${this._isRainingNow() && rain !== null ? `<div class="badge">🌧️ ${rain.toFixed(1)} mm/h</div>` : ""}
+    ${h !== null ? `<div class="badge">💧 ${h}%</div>` : ""}
+    ${w !== null ? `<div class="badge">🌬️ ${w.toFixed(1)} km/h</div>` : ""}
+    ${this._isRainingNow() && r !== null ? `<div class="badge">🌧️ ${r.toFixed(1)} mm/h</div>` : ""}
   </div>
 
   <div class="btns">
@@ -256,19 +244,17 @@ button{border-radius:14px;padding:10px 14px;border:none;background:#ffffff1f;col
     <button id="details">Mostra dati & storici</button>
   </div>
 
-  <div style="margin-top:10px;font-size:11px;opacity:.6">
-    WSC PRO • v${WSCCard.VERSION}
+  <div class="footer">
+    <div>WSC PRO</div>
+    <div>v${WSCCard.VERSION}</div>
   </div>
 </ha-card>`;
 
-    this.shadowRoot.getElementById("charts").onclick = () => {
-      this._ui.charts = !this._ui.charts;
-      alert("Grafici (stabili) pronti per release successiva 🚀");
-    };
-    this.shadowRoot.getElementById("details").onclick = () => {
-      this._ui.details = !this._ui.details;
-      alert("Dati & storici pronti per release successiva 📊");
-    };
+    this.shadowRoot.getElementById("charts").onclick = () =>
+      alert("Grafici PRO pronti per v2.1 🚀");
+
+    this.shadowRoot.getElementById("details").onclick = () =>
+      alert("Dati & storici PRO pronti per v2.1 📊");
   }
 }
 
