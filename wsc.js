@@ -1,20 +1,10 @@
-/* ======================================================
- * WSC PRO – Weather Station Card
- * v2.0.0
- * ======================================================
- * Dual Mode:
- *  - SIMPLE → weather.forecast_*
- *  - PRO → stazione meteo completa
- *
- * Designed for:
- *  ✔ mobile
- *  ✔ tablet
- *  ✔ dashboard
- *  ✔ badge-like cards
- * ====================================================== */
+/* WSC – Weather Station Card
+ * PRO + BASE (auto mode)
+ * v1.7.0
+ */
 
 class WSCCard extends HTMLElement {
-  static VERSION = "1.0.4";
+  static VERSION = "1.0.6";
 
   constructor() {
     super();
@@ -27,57 +17,93 @@ class WSCCard extends HTMLElement {
     };
 
     this._series = new Map();
+    this._rafDraw = null;
+
     this._lastRainEvent = null;
     this._lastRainTs = 0;
-    this._raf = null;
-    this._pending = false;
+
+    this._onToggleCharts = () => {
+      this._ui.showCharts = !this._ui.showCharts;
+      this._render();
+    };
+
+    this._onToggleDetails = () => {
+      this._ui.showDetails = !this._ui.showDetails;
+      this._render();
+    };
   }
 
   /* ================= CONFIG ================= */
 
-  setConfig(cfg) {
-    if (!cfg.weather_entity && !cfg.temperatura) {
+  setConfig(config) {
+    if (!config) throw new Error("Configurazione mancante");
+
+    const isPro = !!config.temperatura;
+    const isBase = !!config.weather_entity;
+
+    if (!isPro && !isBase) {
       throw new Error(
-        'Devi specificare "weather_entity" oppure "temperatura"'
+        'Devi specificare "temperatura" (PRO) oppure "weather_entity" (BASE)'
       );
     }
 
     this._config = {
-      name: cfg.name ?? cfg.nome ?? "",
-      weather_entity: cfg.weather_entity ?? null,
+      // mode
+      weather_entity: null,
+
+      // UI
+      nome: "Meteo",
+      mostra_nome: true,
+      mostra_orologio: true,
+      mostra_data: true,
 
       // PRO sensors
-      temperatura: cfg.temperatura ?? null,
-      umidita: cfg.umidita ?? null,
-      velocita_vento: cfg.velocita_vento ?? null,
-      raffica_vento: cfg.raffica_vento ?? null,
-      direzione_vento: cfg.direzione_vento ?? null,
-      tasso_pioggia: cfg.tasso_pioggia ?? null,
-      pioggia_evento: cfg.pioggia_evento ?? null,
-      radiazione_solare: cfg.radiazione_solare ?? null,
-      lux: cfg.lux ?? null,
-      uv: cfg.uv ?? null,
-      punto_rugiada: cfg.punto_rugiada ?? null,
-      vpd: cfg.vpd ?? null,
-      pressione_relativa: cfg.pressione_relativa ?? null,
-      pressione_assoluta: cfg.pressione_assoluta ?? null,
-      pioggia_giornaliera: cfg.pioggia_giornaliera ?? null,
-      pioggia_mensile: cfg.pioggia_mensile ?? null,
-      pioggia_annuale: cfg.pioggia_annuale ?? null,
+      temperatura: null,
+      umidita: null,
+      velocita_vento: null,
+      raffica_vento: null,
+      direzione_vento: null,
+
+      tasso_pioggia: null,
+      pioggia_evento: null,
+
+      radiazione_solare: null,
+      lux: null,
+      uv: null,
+
+      punto_rugiada: null,
+      vpd: null,
+
+      pressione_relativa: null,
+      pressione_assoluta: null,
+
+      temperatura_interna: null,
+      umidita_interna: null,
+
+      pioggia_giornaliera: null,
+      pioggia_settimanale: null,
+      pioggia_mensile: null,
+      pioggia_annuale: null,
+
+      ...config,
     };
+
+    this._mode = isPro ? "PRO" : "BASE";
   }
 
   set hass(hass) {
     this._hass = hass;
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
-    this._scheduleRender();
+    if (this._mode === "PRO") this._sample();
+    this._render();
   }
 
-  /* ================= UTILS ================= */
+  /* ================= HELPERS ================= */
 
   _state(e) {
-    const s = this._hass?.states?.[e];
-    if (!s || ["unknown", "unavailable", ""].includes(s.state)) return null;
+    if (!e) return null;
+    const s = this._hass.states[e];
+    if (!s || ["unknown", "unavailable"].includes(s.state)) return null;
     return s;
   }
 
@@ -100,10 +126,6 @@ class WSCCard extends HTMLElement {
     };
   }
 
-  _isSimple() {
-    return !!this._config.weather_entity && !this._config.temperatura;
-  }
-
   /* ================= RAIN ================= */
 
   _updateRainEvent() {
@@ -116,38 +138,53 @@ class WSCCard extends HTMLElement {
   }
 
   _isRainingNow() {
-    this._updateRainEvent();
     const rate = this._num(this._config.tasso_pioggia) ?? 0;
-    return rate > 0.1 || Date.now() - this._lastRainTs < 5 * 60 * 1000;
+    if (rate > 0.1) return true;
+    return Date.now() - this._lastRainTs < 5 * 60 * 1000;
   }
 
-  /* ================= METEO ================= */
+  /* ================= CONDITION ================= */
 
-  _simpleCondition(state) {
-    const map = {
-      sunny: ["☀️", "Sole"],
-      clear: ["☀️", "Sereno"],
-      partlycloudy: ["⛅", "Parz. nuvoloso"],
-      cloudy: ["☁️", "Coperto"],
-      rainy: ["🌧️", "Pioggia"],
-      pouring: ["🌧️", "Pioggia forte"],
-      fog: ["🌫️", "Nebbia"],
-      snowy: ["❄️", "Neve"],
-      windy: ["🌬️", "Ventoso"],
+  _conditionPro() {
+    this._updateRainEvent();
+
+    const rain = this._isRainingNow();
+    const uv = this._num(this._config.uv) ?? 0;
+    const lux = this._num(this._config.lux) ?? 0;
+    const solar = this._num(this._config.radiazione_solare) ?? 0;
+    const hum = this._num(this._config.umidita) ?? 0;
+    const wind = this._num(this._config.velocita_vento) ?? 0;
+
+    const sunny = !rain && (uv >= 1 || solar >= 90 || lux >= 4000);
+    if (rain) return { l: "Pioggia", i: "🌧️" };
+    if (sunny) return { l: "Sole", i: "☀️" };
+    if (wind >= 25) return { l: "Ventoso", i: "🌬️" };
+    if (hum >= 92) return { l: "Nebbia", i: "🌫️" };
+    return { l: "Coperto", i: "☁️" };
+  }
+
+  _conditionBase() {
+    const w = this._state(this._config.weather_entity);
+    return {
+      l: w?.state ?? "",
+      i: w?.attributes?.icon ?? "☁️",
     };
-    return map[state] ?? ["☁️", state];
   }
 
-  /* ================= SCHEDULER ================= */
+  /* ================= SERIES ================= */
 
-  _scheduleRender() {
-    if (this._pending) return;
-    this._pending = true;
-    cancelAnimationFrame(this._raf);
-    this._raf = requestAnimationFrame(() => {
-      this._pending = false;
-      this._render();
-    });
+  _push(k, v) {
+    if (!Number.isFinite(v)) return;
+    const a = this._series.get(k) ?? [];
+    a.push(v);
+    while (a.length > 120) a.shift();
+    this._series.set(k, a);
+  }
+
+  _sample() {
+    this._push("temp", this._num(this._config.temperatura));
+    this._push("wind", this._num(this._config.velocita_vento));
+    this._push("rain", this._num(this._config.tasso_pioggia));
   }
 
   /* ================= RENDER ================= */
@@ -156,62 +193,56 @@ class WSCCard extends HTMLElement {
     if (!this._hass || !this._config) return;
 
     const now = this._now();
-    const simple = this._isSimple();
 
-    /* =====================================================
-     * SIMPLE MODE
-     * ===================================================== */
-    if (simple) {
+    /* ===== BASE ===== */
+    if (this._mode === "BASE") {
       const w = this._state(this._config.weather_entity);
-      const [icon, label] = this._simpleCondition(w?.state);
       const temp = w?.attributes?.temperature;
-      const forecast = (w?.attributes?.forecast ?? []).slice(0, 5);
+
+      const forecast = w?.attributes?.forecast ?? [];
 
       this.shadowRoot.innerHTML = `
 <style>
 ha-card{
   padding:22px;
-  border-radius:26px;
+  border-radius:28px;
   background:linear-gradient(135deg,#0b1220,#0f172a);
   color:#fff;
 }
-.header{display:flex;justify-content:space-between}
 .temp{font-size:64px;font-weight:900}
-.icon{font-size:64px;animation:float 6s ease-in-out infinite}
-@keyframes float{50%{transform:translateY(-8px)}}
-.forecast{display:flex;gap:10px;margin-top:16px;overflow-x:auto}
-.day{text-align:center;min-width:60px;opacity:.85}
+.time{margin-top:6px;font-size:14px;opacity:.85}
+.forecast{margin-top:14px;display:flex;gap:10px}
+.day{flex:1;text-align:center;font-size:12px}
 </style>
 
 <ha-card>
-  <div class="header">
-    <div>
-      <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
-      <div>${label}</div>
-      <div>${now.time} • ${now.date}</div>
-    </div>
-    <div class="icon">${icon}</div>
-  </div>
+  <div class="temp">${temp ?? "—"}°</div>
+  <div class="time">${now.time} • ${now.date}</div>
 
   <div class="forecast">
-    ${forecast.map(f => `
+    ${forecast.slice(0, 4).map(f => `
       <div class="day">
-        <div>${new Date(f.datetime).toLocaleDateString("it-IT",{weekday:"short"})}</div>
-        <div>${f.temperature}°</div>
+        ${f.temperature}°
       </div>`).join("")}
   </div>
-</ha-card>`;
+
+  <div style="opacity:.6;font-size:11px;margin-top:10px">
+    WSC • BASE
+  </div>
+</ha-card>
+      `;
       return;
     }
 
-    /* =====================================================
-     * PRO MODE
-     * ===================================================== */
+    /* ===== PRO ===== */
 
-    const t = this._num(this._config.temperatura);
-    const h = this._num(this._config.umidita);
-    const w = this._num(this._config.velocita_vento);
-    const r = this._num(this._config.tasso_pioggia);
+    const cond = this._conditionPro();
+    const temp = this._num(this._config.temperatura);
+    const hum = this._num(this._config.umidita);
+    const wind = this._num(this._config.velocita_vento);
+    const rain = this._isRainingNow()
+      ? this._num(this._config.tasso_pioggia)
+      : null;
 
     this.shadowRoot.innerHTML = `
 <style>
@@ -222,40 +253,44 @@ ha-card{
   color:#fff;
 }
 .temp{font-size:72px;font-weight:900}
-.badges{display:flex;gap:8px;overflow-x:auto;margin-top:6px}
-.badge{padding:6px 12px;border-radius:999px;background:rgba(255,255,255,.14)}
-.btns{display:flex;gap:10px;margin-top:14px}
-button{padding:10px 14px;border-radius:14px;border:none;background:#ffffff1f;color:#fff}
-.footer{margin-top:12px;font-size:11px;opacity:.6;display:flex;justify-content:space-between}
+.badges{display:flex;gap:8px;margin-top:10px}
+.badge{padding:6px 12px;border-radius:999px;background:rgba(255,255,255,.15)}
+.actions{margin-top:14px;display:flex;gap:10px}
+.btn{padding:10px 14px;border-radius:14px;background:rgba(255,255,255,.12);cursor:pointer}
+.grid{margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.tile{background:rgba(255,255,255,.12);padding:14px;border-radius:16px}
 </style>
 
 <ha-card>
-  <div class="temp">${t?.toFixed(1) ?? "—"}°</div>
+  <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
   <div>${now.time} • ${now.date}</div>
 
   <div class="badges">
-    ${h !== null ? `<div class="badge">💧 ${h}%</div>` : ""}
-    ${w !== null ? `<div class="badge">🌬️ ${w.toFixed(1)} km/h</div>` : ""}
-    ${this._isRainingNow() && r !== null ? `<div class="badge">🌧️ ${r.toFixed(1)} mm/h</div>` : ""}
+    <div class="badge">${cond.i} ${cond.l}</div>
+    ${hum !== null ? `<div class="badge">💧 ${hum}%</div>` : ""}
+    ${wind !== null ? `<div class="badge">🌬️ ${wind.toFixed(1)} km/h</div>` : ""}
+    ${rain !== null ? `<div class="badge">🌧️ ${rain.toFixed(1)} mm/h</div>` : ""}
   </div>
 
-  <div class="btns">
-    <button id="charts">Mostra grafici</button>
-    <button id="details">Mostra dati & storici</button>
+  <div class="actions">
+    <div class="btn" id="charts">Mostra grafici</div>
+    <div class="btn" id="details">Mostra dati & storici</div>
   </div>
 
-  <div class="footer">
-    <div>WSC PRO</div>
-    <div>v${WSCCard.VERSION}</div>
+  ${this._ui.showDetails ? `
+    <div class="grid">
+      <div class="tile">VPD<br>${this._num(this._config.vpd)?.toFixed(2) ?? "—"} hPa</div>
+    </div>` : ""}
+
+  <div style="opacity:.6;font-size:11px;margin-top:10px">
+    WSC • PRO v${WSCCard.VERSION}
   </div>
-</ha-card>`;
+</ha-card>
+    `;
 
-    this.shadowRoot.getElementById("charts").onclick = () =>
-      alert("Grafici PRO pronti per v2.1 🚀");
-
-    this.shadowRoot.getElementById("details").onclick = () =>
-      alert("Dati & storici PRO pronti per v2.1 📊");
+    this.shadowRoot.querySelector("#charts")?.addEventListener("click", this._onToggleCharts);
+    this.shadowRoot.querySelector("#details")?.addEventListener("click", this._onToggleDetails);
   }
 }
 
-customElements.define("weather-station-card2", WSCCard);
+customElements.define("weather-station-card", WSCCard);
