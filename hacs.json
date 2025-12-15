@@ -1,0 +1,8 @@
+{
+  "name": "Weather Station Card (WSC)",
+  "type": "frontend",
+  "content_in_root": true,
+  "filename": "wsc-card.js",
+  "render_readme": true,
+  "homeassistant": "2023.8.0"
+}
