@@ -9,7 +9,7 @@
  */
 
 class WSCCard extends HTMLElement {
-  static VERSION = "2.0.3";
+  static VERSION = "2.0.4";
 
   constructor() {
     super();
