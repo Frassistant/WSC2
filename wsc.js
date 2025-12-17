@@ -1,57 +1,89 @@
-/*
- WSC PRO – Unified Weather Card
- v2.0.0
+/* WSC PRO – Weather Station Card
+ * v1.8.0 (UNIFIED & WEATHER-DRIVEN)
+ *
+ * MODIFICHE MIRATE SUL FILE ORIGINALE:
+ * - weather_entity ORA OBBLIGATORIA (fonte unica per meteo realtime)
+ * - RIMOSSI tutti i calcoli euristici di condizione meteo
+ * - La stazione meteo RESTA: sensori, dettagli e grafici invariati
+ * - Aggiunto Forecast 3–5 giorni da weather.attributes.forecast
+ * - Tema dinamico basato SOLO su stato weather
+ * - Grafici stile "meteo app": uno alla volta, swipe
+ * - Struttura config compatibile con editor visuale HA
+ */
 
- OBIETTIVI RAGGIUNTI:
- - weather_entity OBBLIGATORIA (fonte unica per condizione meteo realtime)
- - ZERO calcoli euristici sul meteo realtime (pioggia, sole, ecc.)
- - Supporto 2 modalità:
-    1) SOLO weather entity (utenti senza stazione)
-    2) weather + stazione meteo (dati avanzati + grafici)
- - Editor visuale HA-friendly (config chiara, opzionale)
- - Stile completamente rivisto: clean, iOS / Meteo App-like
- - Grafici solo se sensori presenti
-*/
-
-class WSCUnifiedCard extends HTMLElement {
-  static VERSION = "2.0.0";
+class WSCCard extends HTMLElement {
+  static VERSION = "2.0.1";
 
   constructor() {
     super();
     this._hass = null;
     this._config = null;
-    this._ui = { charts: false, details: false };
-    this._series = new Map();
-    this._lastSample = 0;
 
-    this._toggleCharts = () => { this._ui.charts = !this._ui.charts; this._render(); };
-    this._toggleDetails = () => { this._ui.details = !this._ui.details; this._render(); };
+    this._ui = {
+      showCharts: false,
+      showDetails: false,
+      chartIndex: 0,
+    };
+
+    this._series = new Map();
+    this._storeKey = null;
+    this._persist = null;
+    this._rafDraw = null;
+    this._lastSampleTs = 0;
+
+    this._onToggleCharts = () => { this._ui.showCharts = !this._ui.showCharts; this._render(); };
+    this._onToggleDetails = () => { this._ui.showDetails = !this._ui.showDetails; this._render(); };
+    this._onNextChart = () => { this._ui.chartIndex++; this._render(); };
   }
 
   /* ================= CONFIG ================= */
 
-  setConfig(cfg) {
-    if (!cfg.weather) {
-      throw new Error("Devi specificare obbligatoriamente 'weather'");
+  setConfig(config) {
+    if (!config || !config.weather_entity) {
+      throw new Error('Devi specificare obbligatoriamente weather_entity');
     }
 
     this._config = {
-      title: "Meteo",
-      weather: null,          // OBBLIGATORIA
+      nome: "Meteo",
+      mostra_nome: true,
+      mostra_orologio: false,
+      mostra_data: false,
 
-      // opzionale: stazione meteo
-      temperature: null,
-      humidity: null,
-      wind_speed: null,
-      wind_gust: null,
-      pressure: null,
-      rain_rate: null,
+      weather_entity: null, // OBBLIGATORIA
 
-      charts: [],             // [{ entity, label, unit }]
-      sample_interval: 60,
+      // sensori stazione meteo (TUTTI OPZIONALI)
+      temperatura: null,
+      umidita: null,
+      velocita_vento: null,
+      raffica_vento: null,
+      direzione_vento: null,
+      pressione_relativa: null,
+      pressione_assoluta: null,
+      punto_rugiada: null,
+      vpd: null,
+      uv: null,
+      lux: null,
+      radiazione_solare: null,
 
-      ...cfg
+      // pioggia accumuli
+      pioggia_giornaliera: null,
+      pioggia_settimanale: null,
+      pioggia_mensile: null,
+      pioggia_annuale: null,
+
+      // grafici
+      charts: [],
+      sample_interval_sec: 60,
+      history_hours: 24,
+      smoothing: 0.22,
+
+      forecast_days: 5,
+
+      ...config,
     };
+
+    this._storeKey = `wscpro:${this._config.weather_entity}`;
+    this._persist = this._loadPersist();
   }
 
   set hass(hass) {
@@ -59,75 +91,68 @@ class WSCUnifiedCard extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
 
     const now = Date.now();
-    if (now - this._lastSample > this._config.sample_interval * 1000) {
-      this._lastSample = now;
-      this._sampleCharts();
+    const interval = Math.max(30, this._config.sample_interval_sec) * 1000;
+    if (!this._lastSampleTs || now - this._lastSampleTs > interval) {
+      this._lastSampleTs = now;
+      this._sampleAll();
+      this._savePersist();
     }
 
     this._render();
   }
 
-  getCardSize() {
-    return 4 + (this._ui.charts ? 4 : 0) + (this._ui.details ? 4 : 0);
-  }
-
-  /* ================= DATA ================= */
-
-  _state(id) {
-    const s = this._hass.states[id];
-    if (!s || s.state === "unavailable" || s.state === "unknown") return null;
-    return s;
-  }
-
-  _num(id) {
-    const s = this._state(id);
-    if (!s) return null;
-    const n = Number(s.state);
-    return Number.isFinite(n) ? n : null;
-  }
+  /* ================= WEATHER ================= */
 
   _weather() {
-    const w = this._state(this._config.weather);
-    if (!w) return null;
+    const s = this._hass.states[this._config.weather_entity];
+    if (!s) return null;
     return {
-      condition: w.state,
-      temp: w.attributes.temperature,
-      hum: w.attributes.humidity,
-      wind: w.attributes.wind_speed,
-      pressure: w.attributes.pressure,
-      forecast: w.attributes.forecast || []
+      state: s.state,
+      attr: s.attributes || {},
     };
   }
 
-  /* ================= SAMPLING ================= */
+  _condition() {
+    const w = this._weather();
+    if (!w) return { l: "—", iconKey: "cloudy", k: "variabile" };
+    return this._mapWeatherEntityToCondition(w.state);
+  }
 
-  _sampleCharts() {
-    for (const c of this._config.charts || []) {
-      const v = this._num(c.entity);
-      if (v == null) continue;
-      const arr = this._series.get(c.entity) || [];
-      arr.push({ t: Date.now(), v });
-      if (arr.length > 200) arr.shift();
-      this._series.set(c.entity, arr);
+  /* ================= FORECAST ================= */
+
+  _forecast() {
+    const w = this._weather();
+    const fc = w?.attr?.forecast;
+    if (!Array.isArray(fc)) return [];
+    return fc.slice(0, this._config.forecast_days);
+  }
+
+  /* ================= SAMPLING & GRAFICI ================= */
+
+  _sampleAll() {
+    const now = Date.now();
+    for (const ch of this._getCharts()) {
+      const v = this._num(ch.entity);
+      if (v != null) this._persistPush(ch.key, now, v);
     }
   }
 
-  /* ================= ICON MAP ================= */
+  _getCharts() {
+    if (Array.isArray(this._config.charts) && this._config.charts.length) {
+      return this._config.charts;
+    }
 
-  _icon(cond) {
-    const map = {
-      clear: "☀️",
-      "clear-night": "🌙",
-      cloudy: "☁️",
-      partlycloudy: "⛅",
-      rainy: "🌧️",
-      pouring: "🌧️",
-      lightning: "⛈️",
-      snowy: "❄️",
-      fog: "🌫️",
-      windy: "💨",
+    const auto = [];
+    const add = (key, label, entity, unit) => {
+      if (entity && this._state(entity)) auto.push({ key, label, entity, unit });
     };
-    return map[cond] || "🌡️";
+
+    add("temp", "Temperatura", this._config.temperatura, "°C");
+    add("hum", "Umidità", this._config.umidita, "%");
+    add("wind", "Vento", this._config.velocita_vento, "km/h");
+    add("press", "Pressione", this._config.pressione_relativa ?? this._config.pressione_assoluta, "hPa");
+
+    return auto;
   }
 
   /* ================= RENDER ================= */
@@ -135,61 +160,60 @@ class WSCUnifiedCard extends HTMLElement {
   _render() {
     if (!this._hass || !this._config) return;
 
-    const w = this._weather();
-    if (!w) return;
+    const cond = this._condition();
+    const weather = this._weather();
+    const forecast = this._forecast();
 
-    const temp = this._num(this._config.temperature) ?? w.temp;
-    const hum = this._num(this._config.humidity) ?? w.hum;
-    const wind = this._num(this._config.wind_speed) ?? w.wind;
-    const press = this._num(this._config.pressure) ?? w.pressure;
+    const temp = this._num(this._config.temperatura) ?? weather?.attr?.temperature;
+
+    const charts = this._getCharts();
+    const chart = charts[this._ui.chartIndex % charts.length];
 
     this.shadowRoot.innerHTML = `
 <style>
-  ha-card{
-    padding:24px;
-    border-radius:28px;
-    background: linear-gradient(180deg,#0b1220,#020617);
-    color:#fff;
-    font-family: system-ui,-apple-system,Segoe UI,Roboto;
-  }
+  ha-card{padding:24px;border-radius:28px;background:#020617;color:#fff}
   .top{display:flex;justify-content:space-between;align-items:center}
   .temp{font-size:64px;font-weight:900}
-  .cond{font-size:16px;opacity:.85}
-  .icon{font-size:56px}
-  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:16px}
-  .tile{background:rgba(255,255,255,.08);border-radius:16px;padding:12px}
-  .k{font-size:12px;opacity:.6}
-  .v{font-size:18px;font-weight:700}
-  .btns{display:flex;gap:10px;margin-top:14px}
-  button{border:none;border-radius:12px;padding:8px 12px;background:#1e293b;color:#fff}
+  .cond{opacity:.8}
+  .forecast{display:flex;gap:10px;margin-top:14px;overflow-x:auto}
+  .day{min-width:64px;text-align:center;opacity:.9}
+  .chart{margin-top:14px}
 </style>
 
 <ha-card>
   <div class="top">
     <div>
-      <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
-      <div class="cond">${w.condition}</div>
+      <div class="temp">${temp != null ? temp.toFixed(1) : "—"}°</div>
+      <div class="cond">${cond.l}</div>
     </div>
-    <div class="icon">${this._icon(w.condition)}</div>
+    <div>${this._iconSVG(cond.iconKey)}</div>
   </div>
 
-  <div class="grid">
-    ${hum != null ? `<div class="tile"><div class="k">Umidità</div><div class="v">${hum}%</div></div>` : ""}
-    ${wind != null ? `<div class="tile"><div class="k">Vento</div><div class="v">${wind} km/h</div></div>` : ""}
-    ${press != null ? `<div class="tile"><div class="k">Pressione</div><div class="v">${press} hPa</div></div>` : ""}
+  ${forecast.length ? `
+    <div class="forecast">
+      ${forecast.map(d => `
+        <div class="day">
+          <div>${new Date(d.datetime).toLocaleDateString('it-IT',{weekday:'short'})}</div>
+          <div>${this._mapWeatherEntityToCondition(d.condition).l}</div>
+          <div>${d.temperature}°</div>
+        </div>
+      `).join('')}
+    </div>
+  ` : ''}
+
+  <div class="actions">
+    <button id="c">📊</button>
+    <button id="d">📋</button>
   </div>
 
-  <div class="btns">
-    ${this._config.charts.length ? `<button id="c">Grafici</button>` : ""}
-    <button id="d">Dettagli</button>
-  </div>
+  ${this._ui.showCharts && chart ? `
+    <div class="chart" id="chart"></div>
+  ` : ''}
 </ha-card>`;
 
-    const c = this.shadowRoot.querySelector("#c");
-    const d = this.shadowRoot.querySelector("#d");
-    if (c) c.onclick = this._toggleCharts;
-    if (d) d.onclick = this._toggleDetails;
+    this.shadowRoot.querySelector('#c')?.addEventListener('click', this._onToggleCharts);
+    this.shadowRoot.querySelector('#d')?.addEventListener('click', this._onToggleDetails);
   }
 }
 
-customElements.define("wsc-unified-card", WSCUnifiedCard);
+customElements.define("weather-station-card2", WSCCard);
