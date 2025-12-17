@@ -1648,7 +1648,7 @@ ${onlyWeather ? `
   }
 }
 
-customElements.define("weather-station-card", WSCCard);
+customElements.define("weather-station-card2", WSCCard);
 
 
 /* ===================== Visual Editor (HA) ===================== */
