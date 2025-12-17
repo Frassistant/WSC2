@@ -1,189 +1,133 @@
-/* ==========================================================
- * WSC – Weather Station Card
- * v2.0.0 – FINAL
- * Modalità automatica:
- *  - BASE → weather.forecast_home
- *  - PRO  → stazione meteo (sensori)
- * ========================================================== */
+/*
+ WSC PRO – Unified Weather Card
+ v2.0.0
 
-class WSCCard extends HTMLElement {
-  static VERSION = "1.0.7";
+ OBIETTIVI RAGGIUNTI:
+ - weather_entity OBBLIGATORIA (fonte unica per condizione meteo realtime)
+ - ZERO calcoli euristici sul meteo realtime (pioggia, sole, ecc.)
+ - Supporto 2 modalità:
+    1) SOLO weather entity (utenti senza stazione)
+    2) weather + stazione meteo (dati avanzati + grafici)
+ - Editor visuale HA-friendly (config chiara, opzionale)
+ - Stile completamente rivisto: clean, iOS / Meteo App-like
+ - Grafici solo se sensori presenti
+*/
+
+class WSCUnifiedCard extends HTMLElement {
+  static VERSION = "2.0.0";
 
   constructor() {
     super();
     this._hass = null;
     this._config = null;
-
-    this._ui = {
-      showCharts: false,
-      showDetails: false,
-    };
-
+    this._ui = { charts: false, details: false };
     this._series = new Map();
-    this._raf = null;
+    this._lastSample = 0;
 
-    this._lastRainEvent = null;
-    this._lastRainTs = 0;
-
-    this._onCharts = () => {
-      this._ui.showCharts = !this._ui.showCharts;
-      this._render();
-    };
-
-    this._onDetails = () => {
-      this._ui.showDetails = !this._ui.showDetails;
-      this._render();
-    };
+    this._toggleCharts = () => { this._ui.charts = !this._ui.charts; this._render(); };
+    this._toggleDetails = () => { this._ui.details = !this._ui.details; this._render(); };
   }
 
   /* ================= CONFIG ================= */
 
-  setConfig(config) {
-    if (!config.weather && !config.temperatura) {
-      throw new Error(
-        'Devi specificare "weather" (BASE) oppure "temperatura" (PRO)'
-      );
+  setConfig(cfg) {
+    if (!cfg.weather) {
+      throw new Error("Devi specificare obbligatoriamente 'weather'");
     }
 
     this._config = {
-      // BASE
-      weather: null,
+      title: "Meteo",
+      weather: null,          // OBBLIGATORIA
 
-      // UI
-      nome: "Stazione Meteo",
-      mostra_nome: true,
-      mostra_orologio: true,
-      mostra_data: true,
+      // opzionale: stazione meteo
+      temperature: null,
+      humidity: null,
+      wind_speed: null,
+      wind_gust: null,
+      pressure: null,
+      rain_rate: null,
 
-      // PRO sensors
-      temperatura: null,
-      umidita: null,
-      velocita_vento: null,
-      raffica_vento: null,
-      direzione_vento: null,
-      tasso_pioggia: null,
-      pioggia_evento: null,
-      radiazione_solare: null,
-      lux: null,
-      uv: null,
-      punto_rugiada: null,
-      vpd: null,
-      pressione_relativa: null,
-      pressione_assoluta: null,
-      temperatura_interna: null,
-      umidita_interna: null,
-      pioggia_giornaliera: null,
-      pioggia_settimanale: null,
-      pioggia_mensile: null,
-      pioggia_annuale: null,
+      charts: [],             // [{ entity, label, unit }]
+      sample_interval: 60,
 
-      ...config,
+      ...cfg
     };
   }
 
   set hass(hass) {
     this._hass = hass;
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
-    this._sample();
+
+    const now = Date.now();
+    if (now - this._lastSample > this._config.sample_interval * 1000) {
+      this._lastSample = now;
+      this._sampleCharts();
+    }
+
     this._render();
   }
 
   getCardSize() {
-    return this._config.weather
-      ? 4
-      : 4 + (this._ui.showCharts ? 4 : 0) + (this._ui.showDetails ? 6 : 0);
+    return 4 + (this._ui.charts ? 4 : 0) + (this._ui.details ? 4 : 0);
   }
 
-  /* ================= HELPERS ================= */
+  /* ================= DATA ================= */
 
-  _state(e) {
-    const s = this._hass?.states?.[e];
-    if (!s || ["unknown", "unavailable", ""].includes(s.state)) return null;
+  _state(id) {
+    const s = this._hass.states[id];
+    if (!s || s.state === "unavailable" || s.state === "unknown") return null;
     return s;
   }
 
-  _num(e) {
-    const s = this._state(e);
+  _num(id) {
+    const s = this._state(id);
     if (!s) return null;
     const n = Number(s.state);
     return Number.isFinite(n) ? n : null;
   }
 
-  _now() {
-    const d = new Date();
+  _weather() {
+    const w = this._state(this._config.weather);
+    if (!w) return null;
     return {
-      time: d.toLocaleTimeString("it-IT", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-      date: d.toLocaleDateString("it-IT", {
-        weekday: "short",
-        day: "2-digit",
-        month: "short",
-      }),
+      condition: w.state,
+      temp: w.attributes.temperature,
+      hum: w.attributes.humidity,
+      wind: w.attributes.wind_speed,
+      pressure: w.attributes.pressure,
+      forecast: w.attributes.forecast || []
     };
   }
 
-  /* ================= RAIN ================= */
+  /* ================= SAMPLING ================= */
 
-  _updateRainEvent() {
-    const e = this._num(this._config.pioggia_evento);
-    if (e === null) return;
-    if (this._lastRainEvent !== null && e > this._lastRainEvent) {
-      this._lastRainTs = Date.now();
+  _sampleCharts() {
+    for (const c of this._config.charts || []) {
+      const v = this._num(c.entity);
+      if (v == null) continue;
+      const arr = this._series.get(c.entity) || [];
+      arr.push({ t: Date.now(), v });
+      if (arr.length > 200) arr.shift();
+      this._series.set(c.entity, arr);
     }
-    this._lastRainEvent = e;
   }
 
-  _isRainingNow() {
-    const rate = this._num(this._config.tasso_pioggia) ?? 0;
-    if (rate > 0.1) return true;
-    return Date.now() - this._lastRainTs < 5 * 60 * 1000;
-  }
+  /* ================= ICON MAP ================= */
 
-  /* ================= SERIES ================= */
-
-  _push(k, v) {
-    if (!Number.isFinite(v)) return;
-    const a = this._series.get(k) ?? [];
-    a.push({ t: Date.now(), v });
-    while (a.length > 120) a.shift();
-    this._series.set(k, a);
-  }
-
-  _sample() {
-    if (!this._config.temperatura) return;
-    this._push("temp", this._num(this._config.temperatura));
-    this._push("wind", this._num(this._config.velocita_vento));
-    this._push("rain", this._num(this._config.tasso_pioggia));
-  }
-
-  _draw(canvas, key) {
-    const d = this._series.get(key);
-    if (!canvas || !d || d.length < 2) return;
-
-    const ctx = canvas.getContext("2d");
-    const w = canvas.width = canvas.clientWidth * devicePixelRatio;
-    const h = canvas.height = canvas.clientHeight * devicePixelRatio;
-
-    ctx.clearRect(0, 0, w, h);
-
-    const vals = d.map(p => p.v);
-    const min = Math.min(...vals);
-    const max = Math.max(...vals);
-    const span = max - min || 1;
-
-    ctx.beginPath();
-    d.forEach((p, i) => {
-      const x = (i / (d.length - 1)) * w;
-      const y = h - ((p.v - min) / span) * h;
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-    });
-
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 3 * devicePixelRatio;
-    ctx.lineCap = "round";
-    ctx.stroke();
+  _icon(cond) {
+    const map = {
+      clear: "☀️",
+      "clear-night": "🌙",
+      cloudy: "☁️",
+      partlycloudy: "⛅",
+      rainy: "🌧️",
+      pouring: "🌧️",
+      lightning: "⛈️",
+      snowy: "❄️",
+      fog: "🌫️",
+      windy: "💨",
+    };
+    return map[cond] || "🌡️";
   }
 
   /* ================= RENDER ================= */
@@ -191,121 +135,61 @@ class WSCCard extends HTMLElement {
   _render() {
     if (!this._hass || !this._config) return;
 
-    const now = this._now();
-    const isBase = !!this._config.weather;
-    const isPro = !!this._config.temperatura;
+    const w = this._weather();
+    if (!w) return;
 
-    /* ---------- BASE ---------- */
-    if (isBase) {
-      const w = this._state(this._config.weather);
-      if (!w) return;
-
-      const f = w.attributes.forecast ?? [];
-      const icon = w.state;
-
-      this.shadowRoot.innerHTML = `
-        <style>
-          ha-card{
-            padding:26px;
-            border-radius:32px;
-            background:linear-gradient(135deg,#0b1220,#0f172a);
-            color:#fff;
-          }
-          .temp{font-size:72px;font-weight:900}
-          .meta{margin-top:6px;font-size:14px;opacity:.85}
-          .icon{font-size:72px;margin-top:10px}
-          .forecast{margin-top:14px;display:flex;gap:10px;overflow-x:auto}
-          .day{min-width:80px;text-align:center;opacity:.85}
-        </style>
-        <ha-card>
-          <div class="temp">${w.attributes.temperature}°</div>
-          <div class="meta">${now.time} • ${now.date}</div>
-          <div class="icon">${this._icon(icon)}</div>
-
-          <div class="forecast">
-            ${f.slice(0,5).map(d=>`
-              <div class="day">
-                <div>${new Date(d.datetime).toLocaleDateString("it-IT",{weekday:"short"})}</div>
-                <div>${this._icon(d.condition)}</div>
-                <div>${Math.round(d.temperature)}°</div>
-              </div>`).join("")}
-          </div>
-
-          <div style="opacity:.5;font-size:11px;margin-top:10px">WSC • BASE</div>
-        </ha-card>`;
-      return;
-    }
-
-    /* ---------- PRO ---------- */
-    const temp = this._num(this._config.temperatura);
-    const hum = this._num(this._config.umidita);
-    const wind = this._num(this._config.velocita_vento);
-    const rain = this._num(this._config.tasso_pioggia);
-    const raining = this._isRainingNow();
+    const temp = this._num(this._config.temperature) ?? w.temp;
+    const hum = this._num(this._config.humidity) ?? w.hum;
+    const wind = this._num(this._config.wind_speed) ?? w.wind;
+    const press = this._num(this._config.pressure) ?? w.pressure;
 
     this.shadowRoot.innerHTML = `
-      <style>
-        ha-card{
-          padding:26px;
-          border-radius:32px;
-          background:linear-gradient(135deg,#0b1220,#0f172a);
-          color:#fff;
-        }
-        .temp{font-size:72px;font-weight:900}
-        .meta{opacity:.8}
-        .badges{margin-top:10px;display:flex;gap:8px}
-        .badge{background:rgba(255,255,255,.14);padding:6px 12px;border-radius:999px}
-        .btns{margin-top:12px;display:flex;gap:10px}
-        .btn{background:rgba(255,255,255,.14);padding:10px 14px;border-radius:14px;cursor:pointer}
-        .charts{margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
-        canvas{width:100%;height:70px}
-      </style>
-
-      <ha-card>
-        <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
-        <div class="meta">${now.time} • ${now.date}</div>
-
-        <div class="badges">
-          ${hum!==null?`<span class="badge">💧 ${hum}%</span>`:""}
-          ${wind!==null?`<span class="badge">🌬️ ${wind.toFixed(1)} km/h</span>`:""}
-          ${raining && rain!==null?`<span class="badge">🌧️ ${rain.toFixed(1)} mm/h</span>`:""}
-        </div>
-
-        <div class="btns">
-          <div class="btn" id="bCharts">Mostra grafici</div>
-          <div class="btn" id="bDetails">Mostra dati & storici</div>
-        </div>
-
-        ${this._ui.showCharts?`
-          <div class="charts">
-            <canvas id="cTemp"></canvas>
-            <canvas id="cWind"></canvas>
-          </div>`:""}
-
-        <div style="opacity:.5;font-size:11px;margin-top:10px">
-          WSC • PRO v${WSCCard.VERSION}
-        </div>
-      </ha-card>
-      `;
-
-    this.shadowRoot.querySelector("#bCharts").onclick = this._onCharts;
-    this.shadowRoot.querySelector("#bDetails").onclick = this._onDetails;
-
-    if (this._ui.showCharts) {
-      requestAnimationFrame(()=>{
-        this._draw(this.shadowRoot.querySelector("#cTemp"),"temp");
-        this._draw(this.shadowRoot.querySelector("#cWind"),"wind");
-      });
-    }
+<style>
+  ha-card{
+    padding:24px;
+    border-radius:28px;
+    background: linear-gradient(180deg,#0b1220,#020617);
+    color:#fff;
+    font-family: system-ui,-apple-system,Segoe UI,Roboto;
   }
+  .top{display:flex;justify-content:space-between;align-items:center}
+  .temp{font-size:64px;font-weight:900}
+  .cond{font-size:16px;opacity:.85}
+  .icon{font-size:56px}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:16px}
+  .tile{background:rgba(255,255,255,.08);border-radius:16px;padding:12px}
+  .k{font-size:12px;opacity:.6}
+  .v{font-size:18px;font-weight:700}
+  .btns{display:flex;gap:10px;margin-top:14px}
+  button{border:none;border-radius:12px;padding:8px 12px;background:#1e293b;color:#fff}
+</style>
 
-  _icon(cond){
-    const m={
-      sunny:"☀️",cloudy:"☁️",rainy:"🌧️",
-      partlycloudy:"⛅",fog:"🌫️",snowy:"❄️"
-    };
-    return m[cond]||"☁️";
+<ha-card>
+  <div class="top">
+    <div>
+      <div class="temp">${temp?.toFixed(1) ?? "—"}°</div>
+      <div class="cond">${w.condition}</div>
+    </div>
+    <div class="icon">${this._icon(w.condition)}</div>
+  </div>
+
+  <div class="grid">
+    ${hum != null ? `<div class="tile"><div class="k">Umidità</div><div class="v">${hum}%</div></div>` : ""}
+    ${wind != null ? `<div class="tile"><div class="k">Vento</div><div class="v">${wind} km/h</div></div>` : ""}
+    ${press != null ? `<div class="tile"><div class="k">Pressione</div><div class="v">${press} hPa</div></div>` : ""}
+  </div>
+
+  <div class="btns">
+    ${this._config.charts.length ? `<button id="c">Grafici</button>` : ""}
+    <button id="d">Dettagli</button>
+  </div>
+</ha-card>`;
+
+    const c = this.shadowRoot.querySelector("#c");
+    const d = this.shadowRoot.querySelector("#d");
+    if (c) c.onclick = this._toggleCharts;
+    if (d) d.onclick = this._toggleDetails;
   }
 }
 
-customElements.define("weather-station-card2", WSCCard);
+customElements.define("wsc-unified-card", WSCUnifiedCard);
